@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-resource
+  namespace: simple-api
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: simple-api.com
+    http:
+      paths:
+       - pathType: Prefix
+         backend:
+          service:
+            name: simple-api-svc
+            port:
+              number: 80
+         path: /

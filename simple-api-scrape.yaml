@@ -1,0 +1,18 @@
+# simple-api-scrape.yaml
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: simple-api
+  namespace: monitoring   
+spec:
+  selector:
+    matchLabels:
+      app: simple-api-svc     
+  namespaceSelector:
+    matchNames:
+      - simple-api          
+  endpoints:
+    - port: http         
+      path: actuator/prometheus   
+      interval: 30s
+      scheme: http

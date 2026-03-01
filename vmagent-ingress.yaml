@@ -1,0 +1,19 @@
+# vmagent-ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vmagent-ingr
+  namespace: monitoring
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: vmagent.my
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vmagent
+                port:
+                  number: 8429

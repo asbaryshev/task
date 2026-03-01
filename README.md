@@ -36,10 +36,13 @@
 #### **2. Запуск пода с одним и несколькими контейнерами**  
 - Создать **Pod** (`kubectl run`) взяв за основу образ https://hub.docker.com/r/jkaninda/simple-api
 - Проверить логи  (`kubectl logs <pod> -c <container>`).
+
 ![Скриншот](screenshots/6.png)
-![логи](/simple-api_logs.log)
+
 - Получить доступ к api через `kubectl port-forward`
+
 ![Скриншот](screenshots/7.png)
+
 #### **3. Переход на ReplicaSet и Deployment**  
 - Заменить **Pod** на **Deployment** (указать `replicas: 2`) (https://hub.docker.com/r/jkaninda/simple-api#:~:text=simple%2Dapi%3Alatest%20.-,Run%20on%20Kubernetes,-Prerequisites)
 - Проверить, что при удалении пода он восстанавливается. 
@@ -96,6 +99,7 @@ spec:
 ![Скриншот](screenshots/10.png)
 - Добавить репозиторий `ingress-nginx` https://kubernetes.github.io/ingress-nginx (`helm repo add`)
 - Установить `ingress-nginx` с **NodePort** (если нет LoadBalancer) через (`helm install`)
+
 ![Скриншот](screenshots/11.png)
  
  - Создать **Ingress**-ресурс для маршрутизации трафика на сервис c simple-api.
@@ -120,11 +124,289 @@ spec:
               number: 80
          path: /
  ```
+
 Применим манифест, проверим появился ли Ingress ресурс
+
 ![Скриншот](screenshots/13.png)
+
 Так как мы используем kind, который запускает ноды как Docker-контейнеры, не пробрасывая при этом порты наружу, а маппинг портов при создании кластера в kind я не предусмотрел, будем использовать `kubectl port-forward`.
+
 ![Скриншот](screenshots/14.png)
+
 Сделаем запрос на simple-api.com, убедимся, что все действительно работает
+
 ![Скриншот](screenshots/15.png)
 Убедимся, что трафик проксируется именно через ingress-nginx, сделав запрос на localhost, которого в манифесте ingress ресурса нет
+
 ![Скриншот](screenshots/16.png)
+### **Продвинутая часть**
+
+#### **6. Установка VictoriaMetrics и Grafana через Helm**
+- Добавить репозиторий `vm` https://victoriametrics.github.io/helm-charts/ (`helm repo add`)
+- Установить `victoria-metrics-single` через (`helm install`)
+- Установить `victoria-metrics-operator` через (`helm install`)
+- Установить `victoria-metrics-agent` через (`helm install`) или через CRD
+- Добавить репозиторий `grafana` https://grafana.github.io/helm-charts (`helm repo add`)
+- Установить `grafana` через (`helm install`)
+
+1. Добавим репозиторий vm и установим vm single и vm operator с помощью helm. Будем устанавливать в заранее созданный неймспейс `monitoring`
+
+![Скриншот](screenshots/17.png)
+2. Установим vmagent через CRD. Для этого создадим манифест vmagent.yaml и применим его.
+```yaml
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAgent
+metadata:
+  name: vmagent
+  namespace: monitoring
+spec:
+  replicaCount: 1
+  remoteWrite:
+    - url: "http://victoria-metrics-single-server.monitoring.svc.cluster.local.:8428/api/v1/write"
+  selectAllByDefault: true
+```
+![скриншот](screenshots/18.png)
+
+3. Добавим репозиторий grafana и установим grafana через helm
+
+![скриншот](screenshots/19.png)
+
+#### **7. Сконфигурировать доступ снаружи до /targets VMAgent'а и ui Grafana**
+- Создать **Ingress**-ресурс для маршрутизации трафика на сервис c Grafana.
+
+```yaml
+#grafana-ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-ing
+  namespace: monitoring
+spec:
+  ingressClassName: nginx  
+  rules:
+    - host: grafana.my
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 80
+```
+
+- Создать **Service** типа **ClusterIP** для доступа к поду vmagent.
+
+```yaml
+# vmagent-svc.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmagent
+  namespace: monitoring
+spec:
+  selector:
+    app.kubernetes.io/name: vmagent
+  ports:
+    - name: http
+      port: 8429
+      targetPort: 8429
+```
+
+- Создать **Ingress**-ресурс для маршрутизации трафика на сервис c vmagent. 
+
+```yaml
+# vmagent-ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vmagent-ingr
+  namespace: monitoring
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: vmagent.my
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vmagent
+                port:
+                  number: 8429
+```
+
+Проверим, что все работает
+
+![скриншот](screenshots/20.png)
+
+![скриншот](screenshots/21.png)
+
+#### **8. Добавить сбор метрки с сервиса simple-api и ingress-nginx**
+- Убедиться что метрики simple-api доступны через **Service**
+
+Из документации simple-api выясняем, что метрики доступны через эндпоинт `/actuator`
+![скриншот](screenshots/22.png)
+
+- Создать **VMServiceScrape**-ресурс указывающий на точку сбора метрик simple-api
+
+Создадим манифест для **VMServiceScrape** и применим его:
+
+```yaml
+# simple-api-scrape.yaml
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: simple-api
+  namespace: monitoring   
+spec:
+  selector:
+    matchLabels:
+      app: simple-api-svc     
+  namespaceSelector:
+    matchNames:
+      - simple-api          
+  endpoints:
+    - port: http         
+      path: actuator/prometheus   
+      interval: 30s
+      scheme: http
+```
+
+В simple-api-svc добавим нужные нам лейблы, так как раньше не добавляли, применим манифест:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-api-svc
+  namespace: simple-api
+  labels:
+    app: simple-api-svc # Добавили лейбл
+spec:
+  selector:
+    app: simple-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+```
+
+- Убедиться что **vmagent** собирает метрики с simple-api и отправляет их в **VictoriaMetrics**
+
+![скриншот](screenshots/23.png)
+
+- Сконфигурировать публикацию метрик ingress-nginx'a
+
+Включим сервис мониторинга применив к Ingress-контроллеру патч с помощью helm
+
+![скриншот](screenshots/25.png)
+
+- Создать **VMServiceScrape**-ресурс указывающий на точку сбора метрик ingress-nginx
+```yaml
+# ingress-scrape.yaml
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: ingress-nginx
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+  namespaceSelector:
+    matchNames:
+      - default
+```
+
+- Убедиться что **vmagent** собирает метрики с ingress-nginx и отправляет их в **VictoriaMetrics**
+
+![скриншот](/screenshots/26.png)
+
+#### **9. Добавить дашборды для визуализации получаемых метрик**
+- Импортировать или создать дашборд по визуализации метрик simple-api
+- Импортировать или создать дашборд по визуализации метрик ingress-nginx
+- Импортировать или создать дашборд по визуализации метрик kind
+
+Перейду в веб интерфейс Grafana. Из потока вывода при установке victoria-metrics-single-server я знаю, что сервер vm находится по адресу `http://victoria-metrics-single-server.monitoring.svc.cluster.local.:8428/`. Добавлю новый источник данных типа Prometheus в web-ui Grafana:
+
+![скриншот](/screenshots/27.png)
+![скриншот](/screenshots/28.png)
+
+Импортирую [шаблон](https://grafana.com/grafana/dashboards/14314-kubernetes-nginx-ingress-controller-nextgen-devops-nirvana/)по визуализации метрик ingress-nginx
+
+![скриншот](screenshots/29.png)
+
+Импортирую [шаблон](https://grafana.com/grafana/dashboards/1860-node-exporter-full/) по визуализации метрик kind (то есть метрик кластера)
+
+![скриншот|697](screenshots/30.png)
+
+![скриншот](/screenshots/33.png)
+
+но для того, чтобы мне это сделать, нужно было сначала настроить сбор этих метрик, потому что сбора метрик о кластере по умолчанию не было.
+
+Сначала установлю соответствующие сервисы с помощью helm
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm install kube-state-metrics prometheus-community/kube-state-metrics --namespace monitoring
+helm install node-exporter prometheus-community/prometheus-node-exporter --namespace monitoring
+```
+
+Затем настрою scrape`ы:
+
+```yaml
+#node-exporter-scrape.yaml
+
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: node-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-node-exporter
+  endpoints:
+    - port: metrics  
+      path: /metrics
+      interval: 30s
+  namespaceSelector:
+    matchNames:
+      - monitoring
+```
+
+```yaml
+#kube-state-scrape.yaml
+
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  endpoints:
+    - port: http   
+      path: /metrics
+      interval: 30s
+  namespaceSelector:
+    matchNames:
+      - monitoring
+```
+
+Все работает
+
+![скриншот](/screenshots/31.png)
+
+Для simple-api нет готовых шаблонов, создам шаблон самостоятельно, предварительно изучив доступные метрики в эндпоинте метрик сервиса
+
+![скриншот](screenshots/32.png)
